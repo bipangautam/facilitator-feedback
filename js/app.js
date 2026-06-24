@@ -49,13 +49,26 @@
     return new Date(iso).toLocaleDateString();
   }
 
-  /* ---------------- routing ---------------- */
-  function go(name, params = {}) { route = { name, ...params }; window.scrollTo(0, 0); render(); }
+  /* ---------------- routing (with real browser-back support) ---------------- */
+  function go(name, params = {}) {
+    route = { name, ...params };
+    try { history.pushState({ route }, ""); } catch (e) {}
+    window.scrollTo(0, 0); render();
+  }
   function render() {
     if (!reviewer) return renderLogin();
-    const fns = { home: renderHome, rate: renderRate, dash: renderDash, cumulative: renderCumulative, admin: renderAdmin };
+    const fns = { home: renderHome, rate: renderRate, dash: renderDash,
+      cumulative: renderCumulative, admin: renderAdmin, reviewers: renderReviewers };
     (fns[route.name] || renderHome)();
   }
+  // Hardware/browser back: first close any open modal; otherwise step back
+  // through in-app views instead of leaving the site.
+  window.addEventListener("popstate", (e) => {
+    const ov = document.querySelector(".overlay");
+    if (ov) { ov.remove(); try { history.pushState({ route }, ""); } catch (err) {} return; }
+    if (e.state && e.state.route) { route = e.state.route; window.scrollTo(0, 0); render(); }
+    else { route = { name: "home" }; render(); }
+  });
 
   /* ---------------- LOGIN ---------------- */
   function renderLogin() {
@@ -123,6 +136,7 @@
 
   /* ---------------- HOME ---------------- */
   let homeSearch = "";
+  let homeSort = "alpha"; // alpha | ratingHigh | ratingLow | added
   function renderHome() {
     const root = el(`<div></div>`);
 
@@ -132,10 +146,27 @@
     root.appendChild(el(`
       <div class="hometools">
         <div class="searchbox">🔎<input id="search" placeholder="Search facilitator…" value="${esc(homeSearch)}"></div>
+        <select class="txt sortsel" id="sortsel" title="Sort facilitators">
+          <option value="alpha">A–Z (name)</option>
+          <option value="ratingHigh">Rating: high → low</option>
+          <option value="ratingLow">Rating: low → high</option>
+          <option value="added">Order added</option>
+        </select>
         <button class="btn" id="rankBtn">🏆 Cumulative Ranking</button>
       </div>`));
 
-    const list = Store.facilitators().filter(f =>
+    // build + sort the list
+    const withSum = Store.facilitators().map(f => ({ f, mean: Store.facilitatorSummary(f.id).mean }));
+    withSum.sort((a, b) => {
+      if (homeSort === "alpha") return a.f.name.localeCompare(b.f.name);
+      if (homeSort === "added") return (a.f.display_order - b.f.display_order) || a.f.name.localeCompare(b.f.name);
+      // rating sorts: unrated go last in both directions
+      if (a.mean == null && b.mean == null) return a.f.name.localeCompare(b.f.name);
+      if (a.mean == null) return 1;
+      if (b.mean == null) return -1;
+      return homeSort === "ratingHigh" ? b.mean - a.mean : a.mean - b.mean;
+    });
+    const list = withSum.map(x => x.f).filter(f =>
       !homeSearch || f.name.toLowerCase().includes(homeSearch.toLowerCase()));
 
     if (!Store.facilitators().length) {
@@ -171,7 +202,11 @@
 
     shell(root);
     const s = $("#search");
-    if (s) s.oninput = () => { homeSearch = s.value; const g = $(".grid"); if (g) renderHome(); };
+    if (s) s.oninput = () => {
+      homeSearch = s.value; renderHome();
+      const ns = $("#search"); if (ns) { ns.focus(); const v = ns.value; ns.value = ""; ns.value = v; }
+    };
+    const ss = $("#sortsel"); if (ss) { ss.value = homeSort; ss.onchange = () => { homeSort = ss.value; renderHome(); }; }
     $("#rankBtn").onclick = () => go("cumulative");
   }
 
@@ -257,57 +292,65 @@
         <div><div class="name">${esc(f.name)}</div>
           <div class="meta">${f.phone ? "📞 " + esc(f.phone) + " · " : ""}rating as <b>${esc(reviewer)}</b></div></div>
         <div class="daypick" id="daypick">
+          <span class="daylbl">Day</span>
           ${[1,2,3,4,5].map(d => {
             const has = !!Store.ratingBy(route.id, reviewer, d);
-            return `<button class="daybtn ${d===day?"active":""}" data-day="${d}">${d}${has?'<span class="mk">●</span>':''}</button>`;
+            return `<button class="daybtn ${d===day?"active":""}" data-day="${d}" title="Training day ${d}">${d}${has?'<span class="mk">●</span>':''}</button>`;
           }).join("")}
         </div>
       </div>`);
     root.appendChild(head);
-    root.appendChild(el(`<div class="hint" style="margin:-6px 2px 12px">Tap a score 1–4 for each attribute. Leave blank if you couldn't observe it. Tap <b>ⓘ</b> to see what each level means. Evidence notes open automatically for 1s and 4s.</div>`));
+    root.appendChild(el(`<div class="hint" style="margin:-6px 2px 12px">Pick the <b>Day</b> above, then tap a score <b>1–4</b> per attribute (or <b>–</b> if not observed). Tap <b>?</b> for what each level means, and <b>✎</b> to add an evidence note (recommended for 1s &amp; 4s).</div>`));
 
-    // groups
+    // groups — compact rows: name + score buttons on one line.
+    // Descriptions (?) and evidence note (✎) stay collapsed until tapped.
     RUBRIC.groups.forEach(g => {
       const gc = el(`<div class="groupcard"><div class="grouphd">${esc(g.name)}</div></div>`);
       g.attributes.forEach(a => {
         const cur = scores[a.key];
+        const hasNote = !!(notes[a.key] && notes[a.key].trim());
         const att = el(`
-          <div class="attr" data-key="${a.key}">
-            <div class="ahead"><span class="aname">${esc(a.name)}</span>
-              <span class="aabbr">${esc(a.key)}</span>
-              <button class="ainfo" title="What the levels mean">ⓘ</button></div>
-            <div class="scalebtns">
-              ${[1,2,3,4].map(v => `<button class="sbtn ${cur==v?"sel":""}" data-v="${v}">${v}<small>${esc(RUBRIC.scoreBands[v].label.split(" ")[0])}</small></button>`).join("")}
-              <button class="sbtn clr ${cur==null?"":""}" data-v="clear">blank</button>
+          <div class="attr2" data-key="${a.key}">
+            <div class="arow">
+              <button class="qbtn" title="What the levels mean">?</button>
+              <span class="aname2" title="${esc(a.key)}">${esc(a.name)}</span>
+              <div class="scalebtns2">
+                ${[1,2,3,4].map(v => `<button class="sbtn2 ${cur==v?"sel":""}" data-v="${v}" title="${esc(RUBRIC.scoreBands[v].label)}">${v}</button>`).join("")}
+                <button class="sbtn2 clr ${cur==null?"sel":""}" data-v="clear" title="Not observed">–</button>
+              </div>
+              <button class="notebtn ${hasNote?"has":""} ${(cur==1||cur==4)&&!hasNote?"nudge":""}" title="Evidence note">✎</button>
             </div>
-            <div class="levelhint"></div>
-            <div class="evidence ${cur==1||cur==4?"show":""}">
-              <div class="lbl">Evidence note (recommended for 1s &amp; 4s): one concrete observation</div>
-              <textarea data-note rows="2" placeholder="${esc(a.evidence)}">${esc(notes[a.key]||"")}</textarea>
+            <div class="levelhint2"></div>
+            <div class="evidence2 ${hasNote?"show":""}">
+              <textarea data-note rows="2" placeholder="Evidence note — ${esc(a.evidence)}">${esc(notes[a.key]||"")}</textarea>
             </div>
           </div>`);
-        const hint = $(".levelhint", att);
-        const ev = $(".evidence", att);
+        const hint = $(".levelhint2", att);
+        const ev = $(".evidence2", att);
         const noteBox = $("[data-note]", att);
-        const showHint = (v) => { hint.textContent = `${v} = ${RUBRIC.scoreBands[v].label}: ${a.levels[v]}`; hint.classList.add("show"); };
-        $(".ainfo", att).onclick = () => {
-          if (hint.classList.contains("show") && hint.dataset.mode === "all") { hint.classList.remove("show"); return; }
-          hint.dataset.mode = "all";
+        const noteBtn = $(".notebtn", att);
+        $(".qbtn", att).onclick = () => {
+          if (hint.classList.contains("show")) { hint.classList.remove("show"); return; }
           hint.innerHTML = [1,2,3,4].map(v => `<div style="margin:2px 0"><b style="color:var(--s${v})">${v} ${RUBRIC.scoreBands[v].label}:</b> ${esc(a.levels[v])}</div>`).join("");
           hint.classList.add("show");
         };
-        att.querySelectorAll(".sbtn").forEach(btn => btn.onclick = () => {
+        noteBtn.onclick = () => { ev.classList.toggle("show"); if (ev.classList.contains("show")) noteBox.focus(); };
+        att.querySelectorAll(".sbtn2").forEach(btn => btn.onclick = () => {
           const v = btn.dataset.v;
-          att.querySelectorAll(".sbtn").forEach(b => b.classList.remove("sel"));
-          if (v === "clear") { delete scores[a.key]; ev.classList.remove("show"); hint.classList.remove("show"); btn.classList.add("sel"); }
-          else {
-            scores[a.key] = Number(v); btn.classList.add("sel");
-            hint.dataset.mode = "one"; showHint(Number(v));
-            if (v === "1" || v === "4") ev.classList.add("show");
-          }
+          att.querySelectorAll(".sbtn2").forEach(b => b.classList.remove("sel"));
+          btn.classList.add("sel");
+          if (v === "clear") { delete scores[a.key]; }
+          else { scores[a.key] = Number(v); }
+          // nudge an evidence note for extreme scores
+          noteBtn.classList.toggle("nudge", (v === "1" || v === "4") && !(notes[a.key] && notes[a.key].trim()));
           updateTotal();
         });
-        noteBox.oninput = () => { notes[a.key] = noteBox.value; };
+        noteBox.oninput = () => {
+          notes[a.key] = noteBox.value;
+          const has = !!noteBox.value.trim();
+          noteBtn.classList.toggle("has", has);
+          if (has) noteBtn.classList.remove("nudge");
+        };
         gc.appendChild(att);
       });
       root.appendChild(gc);
@@ -476,7 +519,7 @@
     const wrap = el(`<div class="tablewrap"></div>`);
     const t = el(`<table class="grid-t"></table>`);
     const head = el(`<tr><th class="attrn">Attribute</th></tr>`);
-    cols.forEach(c => head.appendChild(el(`<th>${groupBy==="reviewer"?esc(c.reviewer)+"<br><small style='color:var(--faint)'>D"+c.day+"</small>":"Day "+c.day+"<br><small style='color:var(--faint)'>"+esc(c.reviewer)+"</small>"}</th>`)));
+    cols.forEach(c => head.appendChild(el(`<th>${groupBy==="reviewer"?esc(c.reviewer)+"<br><small style='color:var(--faint)'>Day "+c.day+"</small>":"Day "+c.day+"<br><small style='color:var(--faint)'>"+esc(c.reviewer)+"</small>"}</th>`)));
     head.appendChild(el(`<th>Mean</th>`));
     t.appendChild(head);
 
@@ -594,6 +637,66 @@
     };
   }
 
+  /* ---------------- REVIEWER ACTIVITY (admin) ---------------- */
+  function renderReviewers() {
+    if (!isAdmin) return go("home");
+    cleanupBars(null);
+    const facs = Store.facilitators();
+    const nFac = facs.length;
+    const expected = nFac * RUBRIC.days; // full = every facilitator, all 5 days
+
+    // aggregate per reviewer from ratings + comments
+    const stats = {};
+    const get = (name) => stats[name] || (stats[name] = { ratings: 0, comments: 0, facs: new Set(), days: new Set(), sum: 0, cnt: 0 });
+    facs.forEach(f => {
+      Store.ratingsFor(f.id).forEach(r => {
+        const s = get(r.reviewer); s.ratings++; s.facs.add(f.id); s.days.add(Number(r.day));
+        ATTR_KEYS.forEach(k => { const v = r.scores && r.scores[k]; if (v != null && v !== "") { s.sum += Number(v); s.cnt++; } });
+      });
+      Store.commentsFor(f.id).forEach(c => { get(c.reviewer).comments++; });
+    });
+    const rows = Object.keys(stats).sort((a, b) => a.localeCompare(b)).map(name => {
+      const s = stats[name];
+      return { name, ratings: s.ratings, comments: s.comments, facs: s.facs.size,
+        days: [...s.days].sort((x, y) => x - y), avg: s.cnt ? s.sum / s.cnt : null,
+        pct: expected ? Math.round((s.ratings / expected) * 100) : 0 };
+    });
+
+    const root = el(`<div></div>`);
+    root.appendChild(el(`<button class="back" id="back">← Home</button>`));
+    root.appendChild(el(`<div class="pagehead"><div style="font-size:28px">📋</div>
+      <div><h1>Reviewer activity</h1><div class="muted">${rows.length} reviewer(s) active · ${nFac} facilitators · full review = ${expected} ratings each</div></div></div>`));
+
+    if (!rows.length) {
+      root.appendChild(el(`<div class="empty"><div class="big">📋</div><div>No reviews submitted yet.</div>
+        <div class="hint">Reviewers appear here once they save a rating or post a comment.</div></div>`));
+    } else {
+      root.appendChild(el(`<div class="hint" style="margin-bottom:10px">“Done” = ratings saved out of ${expected} (every facilitator × ${RUBRIC.days} days). Reviewers who haven't started yet won't appear below.</div>`));
+      rows.forEach(r => {
+        const barColor = r.pct >= 100 ? "var(--s4)" : r.pct >= 50 ? "var(--s3)" : r.pct > 0 ? "var(--s2)" : "var(--faint)";
+        const node = el(`
+          <div class="rankrow">
+            ${avatar({ name: r.name }, "avatar")}
+            <div style="flex:1;min-width:0">
+              <div class="nm">${esc(r.name)} ${r.pct >= 100 ? '<span class="band band-ok" style="padding:1px 8px;font-size:11px">✓ complete</span>' : ""}</div>
+              <div class="mt">
+                <span>⭐ ${r.ratings}/${expected} ratings</span>
+                <span>💬 ${r.comments} comments</span>
+                <span>🧑‍🏫 ${r.facs}/${nFac} facilitators</span>
+                <span>📅 days ${r.days.join(",") || "–"}</span>
+                <span>avg given ${r.avg == null ? "–" : r.avg.toFixed(2)}</span>
+              </div>
+              <div class="bar"><i style="width:${Math.min(100, r.pct)}%;background:${barColor}"></i></div>
+            </div>
+            <div class="scorebox"><div class="big">${r.pct}%</div><div class="of">done</div></div>
+          </div>`);
+        root.appendChild(node);
+      });
+    }
+    shell(root);
+    $("#back", root).onclick = () => go("admin");
+  }
+
   /* ---------------- ADMIN ---------------- */
   function adminGate() {
     if (!isAdmin) {
@@ -665,6 +768,11 @@
 values ('New Person', 'CODE-123', false);</div>
       </div></div>`));
 
+    // reviewer activity
+    root.appendChild(el(`<div class="section"><h2>Reviewer activity</h2>
+      <div class="hint" style="margin-bottom:10px">See who has reviewed how much — totals, averages and completion across all facilitators.</div>
+      <button class="btn" id="revAct">📋 Open reviewer activity</button></div>`));
+
     // data tools
     root.appendChild(el(`<div class="section"><h2>Data &amp; backup</h2>
       <div class="hint" style="margin-bottom:10px">Data auto-saves locally every ${CONFIG.AUTOSAVE_SECONDS}s. Export regularly so nothing is lost if a device closes.</div>
@@ -674,8 +782,25 @@ values ('New Person', 'CODE-123', false);</div>
         <button class="btn ghost" id="ec">⬇ Comments CSV</button>
       </div></div>`));
 
+    // danger zone — purge
+    root.appendChild(el(`<div class="section" style="border-color:var(--bad)">
+      <h2 style="color:var(--bad)">⚠️ Danger zone</h2>
+      <div class="hint" style="margin-bottom:10px">Delete <b>all ratings and comments</b> (facilitators and login codes are kept). Use this to reset after test runs. This removes the data from the live database for everyone and cannot be undone — export a backup first.</div>
+      <button class="btn danger" id="purgeBtn">🗑 Purge all ratings &amp; comments</button></div>`));
+
     shell(root);
     $("#back", root).onclick = () => go("home");
+    $("#revAct", root).onclick = () => go("reviewers");
+    $("#purgeBtn", root).onclick = async () => {
+      const r = Store.exportBundle();
+      const total = (r.ratings || []).length + (r.comments || []).length;
+      if (!confirm(`Delete ALL ${total} ratings + comments from the live database? Facilitators are kept. This cannot be undone.`)) return;
+      const typed = prompt('This is permanent. Type  PURGE  to confirm:');
+      if (typed !== "PURGE") return alert("Cancelled — nothing was deleted.");
+      await Store.purgeData();
+      toast("All ratings & comments deleted");
+      renderAdmin();
+    };
     $("#addb", root).onclick = async () => {
       const n = $("#an").value.trim(); if (!n) return $("#an").focus();
       await Store.addFacilitator({ name: n, phone: $("#ap").value.trim() });
@@ -724,11 +849,12 @@ values ('New Person', 'CODE-123', false);</div>
   /* ---------------- boot ---------------- */
   Store.setOnChange(() => {
     // re-render the current data-driven view on live updates
-    if (["home", "dash", "cumulative", "admin"].includes(route.name)) {
+    if (["home", "dash", "cumulative", "admin", "reviewers"].includes(route.name)) {
       const active = document.activeElement;
       const typing = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
       if (!typing && !document.querySelector(".overlay")) render();
     }
   });
+  try { history.replaceState({ route }, ""); } catch (e) {}
   Store.init().then(() => render());
 })();

@@ -180,6 +180,20 @@ const Store = (() => {
     if (useSupabase) await db.from("comments").delete().eq("id", id);
   }
 
+  // Wipe ALL ratings + comments (keeps facilitators & reviewers).
+  // Used by admin to reset after test runs. Deletes from Supabase too.
+  async function purgeData() {
+    state.comments = []; state.ratings = [];
+    saveLocal(); onChange();
+    if (useSupabase) {
+      const c = await db.from("comments").delete().not("id", "is", null);
+      const r = await db.from("ratings").delete().not("id", "is", null);
+      if (c.error) console.warn(c.error);
+      if (r.error) console.warn(r.error);
+      await loadAll(); onChange();
+    }
+  }
+
   // Upsert one rating per (facilitator, reviewer, day)
   async function saveRating({ facilitator_id, reviewer, day, scores, notes = {}, overall_note = "" }) {
     let row = ratingBy(facilitator_id, reviewer, day);
@@ -353,7 +367,7 @@ const Store = (() => {
     init, mode, authMode, login, setOnChange, loadAll, lastSavedAt,
     facilitators, facilitator, commentsFor, ratingsFor, ratingBy, allReviewers,
     addFacilitator, updateFacilitator, deleteFacilitator,
-    addComment, deleteComment, saveRating,
+    addComment, deleteComment, saveRating, purgeData,
     rowTotal, aggregate, decisionBand, facilitatorSummary,
     exportJSON, exportRatingsCSV, exportCommentsCSV, importBundle, exportBundle
   };
