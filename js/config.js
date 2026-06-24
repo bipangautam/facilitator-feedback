@@ -12,7 +12,7 @@
    ============================================================ */
 
 const CONFIG = {
-  SUPABASE_URL: "https://kizhmswviydwuxekothu.supabase.co/rest/v1/",      // e.g. "https://abcdefgh.supabase.co"
+  SUPABASE_URL: "https://kizhmswviydwuxekothu.supabase.co",      // e.g. "https://abcdefgh.supabase.co"
   SUPABASE_ANON_KEY: "sb_publishable_sJRHAePjBeiyFwVdrRLj5w_PUvZ7p8O", // the long public "anon" key
 
   // LOGIN CODES are managed in the database (the `reviewers` table,
